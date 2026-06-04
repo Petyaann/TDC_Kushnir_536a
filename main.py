@@ -2,103 +2,114 @@ import warnings
 warnings.filterwarnings("ignore")
 
 import soundfile as sf
-from scipy.signal import convolve
+from scipy.signal import resample
 import numpy as np
 import matplotlib.pyplot as plt
-import pywt
-from skimage.restoration import cycle_spin
+from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
+import glob
 
 SAMPLE_RATE = 44100
+
 NAME_ORIGINAL_WAV = "./Sounds/Sound_44100[Hz]_2[byte].wav"
+NAME_RESAMPLED_WAV = "./Sounds/Sound_4000[Hz]_2[byte].wav"
 
 
-def wavelet_denoiser(signal, level=5, mode="hard", wavelet="db4"):
-    coeffs = pywt.wavedec(signal, wavelet, level=level)
-
-    sigma = np.median(np.abs(coeffs[-1])) / 0.6745
-    threshold = sigma * np.sqrt(2 * np.log(signal.size))
-
-    denoised_coeffs = [coeffs[0]] + [
-        pywt.threshold(c, threshold, mode=mode)
-        for c in coeffs[1:]
-    ]
-
-    denoised_signal = pywt.waverec(denoised_coeffs, wavelet)
-
-    return denoised_signal[:len(signal)]
-
-
-def gaussian_kernel(size, sigma):
-    x = np.linspace(-(size // 2), size // 2, size)
-    kernel = np.exp(-0.5 * (x / sigma) ** 2)
-    return kernel / kernel.sum()
-
-
-def wavelet_shifted_filter():
-    data, fs_original = sf.read(NAME_ORIGINAL_WAV)
-
-    if len(data.shape) > 1:
-        data = data[:, 0]
-
-    time = np.arange(len(data)) / fs_original
-
-    max_shifts = [0, 1, 3, 5]
-    signals = []
-
-    for n, s in enumerate(max_shifts):
-        sig_filtered = cycle_spin(
-            data,
-            func=wavelet_denoiser,
-            max_shifts=s,
-            shift_steps=5
-        )
-
-        sf.write(
-            f"./Sounds/Filtered_Shifted_Wavelet_{n}.wav",
-            sig_filtered,
-            SAMPLE_RATE
-        )
-
-        signals.append(sig_filtered)
-
-    kernel = gaussian_kernel(size=11, sigma=2)
-    filtered_signal = convolve(data, kernel, mode="same")
-
-    sf.write(
-        "./Sounds/Filtered_Gaussian_Filter.wav",
-        filtered_signal,
-        SAMPLE_RATE
+def to_scientific_pretty(x, precision=2):
+    superscripts = str.maketrans(
+        "0123456789-",
+        "⁰¹²³⁴⁵⁶⁷⁸⁹⁻"
     )
 
-    plt.figure(figsize=(12, 6))
-    plt.plot(time, data, label=f"Оригінал (fs={SAMPLE_RATE} Гц)")
-    plt.plot(time, signals[0], label="Wavelet Shifted: no shift")
-    plt.plot(time, signals[1], label="Wavelet Shifted: 1x2")
-    plt.plot(time, signals[2], label="Wavelet Shifted: 1x4")
-    plt.plot(time, signals[3], label="Wavelet Shifted: 1x6")
-    plt.title("Порівняння сигналів у часовій області, вейвлет-фільтр, модифікований")
-    plt.xlabel("Час (с)")
-    plt.ylabel("Амплітуда")
-    plt.grid(True)
-    plt.legend()
+    mantissa, exponent = f"{x:.{precision}e}".split("e")
+    mantissa = mantissa.rstrip("0").rstrip(".")
+
+    return f"{mantissa} · 10{str(int(exponent)).translate(superscripts)}"
+
+
+def make_metrics_table():
+    results = []
+    row = []
+    headers = ["MSE", "MAE", "RMSE", "R2", "D"]
+
+    data_original, fs_original = sf.read(NAME_ORIGINAL_WAV)
+
+    if len(data_original.shape) > 1:
+        data_original = data_original[:, 0]
+
+    wav_files = glob.glob("./Sounds/*.wav")
+
+    for sounds in wav_files:
+        sounds = sounds.replace("\\", "/")
+
+        if sounds == NAME_ORIGINAL_WAV:
+            continue
+
+        if sounds == NAME_RESAMPLED_WAV:
+            row.append("Ресемпл 4 кГц")
+
+            data, fs = sf.read(sounds)
+
+            if len(data.shape) > 1:
+                data = data[:, 0]
+
+            data = resample(data, len(data_original))
+
+        else:
+            type_filter = sounds.replace("./Sounds/Filtered_", "")
+            type_filter = type_filter.replace(".wav", "")
+            type_filter = type_filter.replace("_", " ")
+
+            if type_filter == "4000[Hz] 2[byte]":
+                type_filter = "Лінійний фільтр 4 кГц"
+
+            row.append(type_filter)
+
+            data, fs = sf.read(sounds)
+
+            if len(data.shape) > 1:
+                data = data[:, 0]
+
+            if len(data) != len(data_original):
+                data = resample(data, len(data_original))
+
+        mse = mean_squared_error(data_original, data)
+        mae = mean_absolute_error(data_original, data)
+        rmse = np.sqrt(mse)
+        r2 = r2_score(data_original, data)
+        d = np.var(data_original - data)
+
+        results.append([
+            to_scientific_pretty(mse),
+            to_scientific_pretty(mae),
+            to_scientific_pretty(rmse),
+            round(r2, 2),
+            to_scientific_pretty(d)
+        ])
+
+    n_rows = len(row)
+    n_cols = len(headers)
+
+    fig, ax = plt.subplots(figsize=(n_cols * 2.8, n_rows * 0.4))
+    ax.axis("off")
+
+    table = ax.table(
+        cellText=results,
+        rowLabels=row,
+        colLabels=headers,
+        cellLoc="center",
+        rowLoc="center",
+        bbox=[0.08, 0, 1, 1]
+    )
+
+    table.auto_set_font_size(False)
+    table.set_fontsize(9)
+
     plt.tight_layout()
-    plt.savefig("./Sounds/Shifted_Wavelet_Compare.png", dpi=300)
+    plt.savefig("./Sounds/Metrics_Table.png", dpi=600)
     plt.show()
 
-    plt.figure(figsize=(12, 6))
-    plt.plot(time, data, label=f"Оригінал (fs={SAMPLE_RATE} Гц)")
-    plt.plot(time, filtered_signal, label="Gaussian Filter")
-    plt.title("Порівняння сигналів у часовій області, фільтр Гаусса")
-    plt.xlabel("Час (с)")
-    plt.ylabel("Амплітуда")
-    plt.grid(True)
-    plt.legend()
-    plt.tight_layout()
-    plt.savefig("./Sounds/Gaussian_Filter_Compare.png", dpi=300)
-    plt.show()
-
-    print("Практична робота №4 виконана.")
+    print("Практична робота №5 виконана.")
 
 
 if __name__ == "__main__":
-    wavelet_shifted_filter()
+    make_metrics_table()
